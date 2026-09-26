@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11 (with pip cache)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint (flake8)
+        run: flake8 app tests
+
+      - name: Tests with coverage (Quality Gate >= 80%)
+        # параметры покрытия и порог --cov-fail-under=80 заданы в setup.cfg
+        run: pytest
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f coverage.xml ]; then
+            rate=$(python -c "import xml.etree.ElementTree as E; print(round(float(E.parse('coverage.xml').getroot().get('line-rate'))*100, 2))")
+            echo "### Покрытие кода: ${rate}% (порог 80%)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Build (syntax check + app import)
+        run: |
+          python -m compileall -q app run.py
+          python -c "from app import create_app; create_app()"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: ignore
