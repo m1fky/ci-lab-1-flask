@@ -6,6 +6,7 @@ def create_app():
 
     @app.route("/health")
     def health():
+        """Health-check endpoint для проверки контейнера."""
         return jsonify(status="ok"), 200
 
     return app

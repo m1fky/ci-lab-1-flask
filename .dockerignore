@@ -1,0 +1,17 @@
+# В build-контекст попадает только то, что нужно для сборки образа
+.git
+.github
+venv
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.coverage
+coverage.xml
+htmlcov
+reports
+tests
+Dockerfile*
+.dockerignore
+README.md
+setup.cfg
