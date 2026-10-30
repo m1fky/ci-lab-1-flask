@@ -3,24 +3,25 @@ name: CI
 on:
   push:
     branches: [main]
+    # Коммит job update-manifest меняет только манифест: новый запуск для него не нужен
+    paths-ignore:
+      - "k8s-manifests/**"
   pull_request:
     branches: [main]
 
-# Права токена GITHUB_TOKEN: читать код и публиковать пакеты в GHCR
+# По умолчанию токен только читает; права на запись выдаются конкретным job
 permissions:
   contents: read
-  packages: write
 
 env:
   # Версия Trivy закреплена явно (см. инцидент CVE-2026-33634)
   TRIVY_IMAGE: aquasec/trivy:0.75.0
 
 jobs:
+  # ---------- ЛР1: линтер, Unit-тесты с покрытием, проверка сборки ----------
   build-and-test:
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-24.04
     steps:
-      # ---------- ЛР1: проверки кода ----------
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -39,16 +40,16 @@ jobs:
       - name: Lint (flake8)
         run: flake8 app tests
 
-      - name: Tests with coverage (Quality Gate >= 80%)
-        # параметры покрытия и порог --cov-fail-under=80 заданы в setup.cfg
-        run: pytest
+      - name: Unit tests with coverage (Quality Gate >= 80%)
+        # порог --cov-fail-under=80 и исключение app/visits.py заданы в setup.cfg
+        run: pytest tests/unit
 
       - name: Coverage summary
         if: always()
         run: |
           if [ -f coverage.xml ]; then
             rate=$(python -c "import xml.etree.ElementTree as E; print(round(float(E.parse('coverage.xml').getroot().get('line-rate'))*100, 2))")
-            echo "### Покрытие кода: ${rate}% (порог 80%)" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Покрытие Unit-тестами: ${rate}% (порог 80%)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Build (syntax check + app import)
@@ -66,7 +67,58 @@ jobs:
             htmlcov/
           if-no-files-found: ignore
 
-      # ---------- ЛР2: Docker-образ ----------
+  # ---------- ЛР3: интеграционные тесты с Testcontainers ----------
+  integration-tests:
+    needs: build-and-test
+    runs-on: ubuntu-24.04
+    steps:
+      # job'ы не разделяют файловую систему: код и зависимости ставятся заново
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.12 (with pip cache)
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Integration tests (parallel, PostgreSQL + Redis in Testcontainers)
+        run: |
+          # журнал запуска и удаления контейнеров тестовой сессии
+          docker events --filter type=container --filter label=org.testcontainers.session-id \
+            --format '{{.Action}} {{index .Actor.Attributes "image"}} {{.Actor.ID}}' > tc-events.log &
+          echo $! > tc-events.pid
+          pytest tests/integration -n auto --no-cov -v --durations=0
+
+      - name: Testcontainers cleanup check
+        if: always()
+        run: |
+          sleep 2
+          kill "$(cat tc-events.pid)" 2>/dev/null || true
+          echo "События контейнеров тестовой сессии:"
+          grep -E '^(start|destroy) ' tc-events.log | cut -c1-60 || true
+          left=$(docker ps -aq --filter label=org.testcontainers.session-id | wc -l)
+          echo "Контейнеров Testcontainers после завершения тестов: $left"
+          echo "### Контейнеров Testcontainers после тестов: $left" >> "$GITHUB_STEP_SUMMARY"
+          test "$left" -eq 0
+
+  # ---------- ЛР2: сборка, сканирование и публикация образа ----------
+  docker-image:
+    needs: integration-tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -150,7 +202,7 @@ jobs:
           path: reports/sbom.cdx.json
           if-no-files-found: ignore
 
-      # ---------- Публикация: только push в main и только после Quality Gate ----------
+      # публикация: только push в main и только после Quality Gate
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
@@ -165,3 +217,71 @@ jobs:
           docker push "$IMAGE:$SHORT_SHA"
           docker push "$IMAGE:build-${{ github.run_number }}"
           echo "### Опубликован образ: \`$IMAGE:$SHORT_SHA\` и \`$IMAGE:build-${{ github.run_number }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- ЛР3: продвижение образа в staging без пересборки ----------
+  promote-to-staging:
+    needs: docker-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - name: Compute image names
+        run: |
+          echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          echo "SRC=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "DST=ghcr.io/${GITHUB_REPOSITORY,,}-staging" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR (skopeo)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Copy image to staging (no rebuild)
+        run: skopeo copy --all --preserve-digests "docker://$SRC:$SHORT_SHA" "docker://$DST:$SHORT_SHA"
+
+      - name: Verify staging image
+        run: |
+          skopeo inspect "docker://$DST:$SHORT_SHA" | jq '{Name, Digest, Created, Labels}'
+          src=$(skopeo inspect --format '{{.Digest}}' "docker://$SRC:$SHORT_SHA")
+          dst=$(skopeo inspect --format '{{.Digest}}' "docker://$DST:$SHORT_SHA")
+          echo "dev:     $SRC:$SHORT_SHA  $src"
+          echo "staging: $DST:$SHORT_SHA  $dst"
+          test "$src" = "$dst"
+          echo "### Продвинут в staging: \`$DST:$SHORT_SHA\` (digest совпадает с dev)" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- ЛР3: GitOps, обновление тега в манифесте staging ----------
+  update-manifest:
+    needs: promote-to-staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read  # push выполняется через deploy key, а не через GITHUB_TOKEN
+    steps:
+      - name: Checkout (deploy key with write access)
+        uses: actions/checkout@v5
+        with:
+          ssh-key: ${{ secrets.MANIFEST_DEPLOY_KEY }}
+          fetch-depth: 0
+
+      - name: Update image tag in staging manifest
+        env:
+          MANIFEST: k8s-manifests/staging/deployment.yaml
+        run: |
+          yq --version
+          export NEW_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}-staging:${GITHUB_SHA::7}"
+          yq -i '.spec.template.spec.containers[0].image = strenv(NEW_IMAGE)' "$MANIFEST"
+          git diff -- "$MANIFEST"
+          test "$(yq '.spec.template.spec.containers[0].image' "$MANIFEST")" = "$NEW_IMAGE"
+
+      - name: Commit and push manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s-manifests/staging/deployment.yaml
+          if git diff --cached --quiet; then
+            echo "Тег в манифесте уже актуален"
+            exit 0
+          fi
+          git commit -m "Deploy ${GITHUB_SHA::7} to staging [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
+          echo "### Манифест staging обновлён: тег ${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"
