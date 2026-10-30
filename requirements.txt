@@ -1,4 +1,5 @@
-Flask==3.1.2
+# Все зависимости для разработки и CI: production + инструменты проверки
+-r requirements-prod.txt
 pytest==8.4.1
 pytest-cov==6.2.1
 flake8==7.3.0
