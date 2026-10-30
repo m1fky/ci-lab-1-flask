@@ -20,7 +20,7 @@ def test_second_request_uses_cache(visits_env):
 
     response = client.get("/visits")
 
-    assert response.get_json() == {"count": 1, "source": "db"}
+    assert response.get_json() == {"count": 1, "source": "cache"}
 
 
 def test_counter_grows_after_cache_expiry(visits_env):
