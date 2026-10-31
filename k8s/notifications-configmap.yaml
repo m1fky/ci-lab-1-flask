@@ -1,0 +1,26 @@
+# Уведомления Argo Rollouts (встроенный notifications-контроллер) в Telegram.
+# Токен бота хранится в Secret argo-rollouts-notification-secret (ключ telegram-token), не в Git.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argo-rollouts-notification-configmap
+  namespace: argo-rollouts
+data:
+  service.telegram: |
+    token: $telegram-token
+  template.rollout-degraded: |
+    message: |
+      🚨 Rollout {{.rollout.metadata.name}} ({{.rollout.metadata.namespace}}) откачен автоматически.
+      Отклонённый образ: {{(index .rollout.spec.template.spec.containers 0).image}}
+      Причина: доля ответов 5xx превысила порог 1% (AnalysisTemplate error-rate-check).
+      Трафик возвращён на стабильную версию.
+  template.rollout-completed: |
+    message: |
+      ✅ Rollout {{.rollout.metadata.name}} ({{.rollout.metadata.namespace}}) успешно завершён.
+      Образ: {{(index .rollout.spec.template.spec.containers 0).image}}
+  trigger.on-rollout-degraded: |
+    - when: rollout.status.phase == 'Degraded' || rollout.status.abort == true
+      send: [rollout-degraded]
+  trigger.on-rollout-completed: |
+    - when: rollout.status.phase == 'Healthy'
+      send: [rollout-completed]

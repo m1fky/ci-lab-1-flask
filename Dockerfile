@@ -27,6 +27,12 @@ WORKDIR /app
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build /app/app ./app
 
+# ЛР4: один и тот же Dockerfile собирает стабильный и «сломанный» образ
+ARG CHAOS_MODE=false
+ENV CHAOS_MODE=$CHAOS_MODE
+
 USER appuser
-EXPOSE 5000
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:create_app()"]
+EXPOSE 3000
+# Один процесс gunicorn: счётчики prometheus_client живут в памяти процесса,
+# и /metrics должен отдавать полную статистику Pod
+CMD ["gunicorn", "--bind", "0.0.0.0:3000", "--workers", "1", "app:create_app()"]
