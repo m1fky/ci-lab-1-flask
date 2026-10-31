@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: ci-lab-flask
-          image: ghcr.io/m1fky/ci-lab-1-flask-staging:e0a7b39
+          image: ghcr.io/m1fky/ci-lab-1-flask-staging:80381bd
           ports:
             - containerPort: 3000
           readinessProbe:
