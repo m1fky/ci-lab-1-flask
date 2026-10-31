@@ -1,0 +1,50 @@
+# ЛР4, раздел 5.1: обычный Deployment со стратегией Rolling Update
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  namespace: staging
+spec:
+  replicas: 6
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1   # не больше 1 Pod из 6 может быть недоступен во время обновления
+      maxSurge: 2         # не больше 2 Pod сверх 6 может быть создано одновременно
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          image: localhost:5001/myapp:stable
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            periodSeconds: 10
+---
+# Общий Service на все Pod приложения (и stable, и canary): через него идёт нагрузка
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+  namespace: staging
+spec:
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      targetPort: 3000

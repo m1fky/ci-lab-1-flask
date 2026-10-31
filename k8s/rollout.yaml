@@ -1,0 +1,72 @@
+# ЛР4, разделы 5.2-5.4: Canary Deployment через Argo Rollouts с анализом метрик
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: myapp
+  namespace: staging
+  annotations:
+    # подписка на уведомления в Telegram (значение: chat id получателя)
+    notifications.argoproj.io/subscribe.on-rollout-degraded.telegram: "-5434770606"
+    notifications.argoproj.io/subscribe.on-rollout-completed.telegram: "-5434770606"
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          image: localhost:5001/myapp:stable
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            periodSeconds: 5
+  strategy:
+    canary:
+      stableService: myapp-stable
+      canaryService: myapp-canary
+      # фоновый анализ: начинается после первого шага и идёт до конца выката
+      analysis:
+        templates:
+          - templateName: error-rate-check
+        startingStep: 1
+      steps:
+        - setWeight: 10
+        - pause: { duration: 1m }
+        - setWeight: 25
+        - pause: { duration: 1m }
+        - setWeight: 50
+        - pause: { duration: 1m }
+        - setWeight: 100
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-stable
+  namespace: staging
+spec:
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-canary
+  namespace: staging
+spec:
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      targetPort: 3000
